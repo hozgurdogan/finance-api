@@ -14,15 +14,14 @@ func TestScrape(t *testing.T) {
 		if r.Method != "POST" {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
-		if r.Header.Get("Content-Type") != "application/x-www-form-urlencoded" {
+		if r.Header.Get("Content-Type") != "application/json" {
 			t.Errorf("unexpected content type: %s", r.Header.Get("Content-Type"))
 		}
 
-		resp := fundData{
-			RecordsTotal: 2,
-			Data: []tefasPriceData{
-				{Timestamp: "1704067200000", FundCode: "YAC", Price: 1.23},
-				{Timestamp: "1704153600000", FundCode: "YAC", Price: 1.24},
+		resp := priceResponse{
+			ResultList: []priceItem{
+				{FonKodu: "YAC", Tarih: "2024-01-01T00:00:00", BirimPay: 1.23},
+				{FonKodu: "YAC", Tarih: "2024-01-02T00:00:00", BirimPay: 1.24},
 			},
 		}
 		_ = json.NewEncoder(w).Encode(resp)
@@ -32,9 +31,7 @@ func TestScrape(t *testing.T) {
 	s := New(
 		WithWorkers(1),
 		WithClient(ts.Client()),
-		WithHistoryEndpoint(ts.URL),
 		WithBaseURL(ts.URL),
-		WithReferer(ts.URL),
 	)
 
 	from := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -62,18 +59,17 @@ func TestScrape_EmptySymbol(t *testing.T) {
 	}
 }
 
-func TestParseTimestamp(t *testing.T) {
-	// 2024-01-01 00:00:00 UTC in milliseconds
-	got := parseTimestamp("1704067200000")
+func TestParseDate(t *testing.T) {
+	got := parseDate("2024-01-01T00:00:00")
 	want := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	if !got.Equal(want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }
 
-func TestParseTimestamp_Invalid(t *testing.T) {
-	got := parseTimestamp("invalid")
+func TestParseDate_Invalid(t *testing.T) {
+	got := parseDate("invalid")
 	if !got.IsZero() {
-		t.Errorf("expected zero time for invalid timestamp, got %v", got)
+		t.Errorf("expected zero time for invalid date, got %v", got)
 	}
 }
