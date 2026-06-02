@@ -28,9 +28,9 @@ func Open(dsn string) (*DB, error) {
 		db.SetMaxOpenConns(1)
 	}
 
-	// Enable WAL mode and foreign keys for better concurrency.
+	// WAL mode uses mmap/shm files unavailable in Cloud Run; use DELETE mode.
 	for _, pragma := range []string{
-		"PRAGMA journal_mode=WAL",
+		"PRAGMA journal_mode=DELETE",
 		"PRAGMA foreign_keys=ON",
 		"PRAGMA busy_timeout=5000",
 	} {
