@@ -1,8 +1,11 @@
 // Package tefas scrapes fund price data from tefas.gov.tr.
 //
-// TEFAS retired the legacy /api/DB/BindHistoryInfo endpoint in 2026.
-// The new API is /api/funds/fonFiyatBilgiGetir — JSON POST, per-fund,
-// with a fixed periyod (months-back) parameter: 1|3|6|12|36|60.
+// The new TEFAS API (2026) requires:
+//   - A session cookie obtained by a GET to the root URL first
+//   - JSON POST to /api/funds/fonFiyatBilgiGetir
+//   - Fixed periyod parameter: 1|3|6|12|36|60 (months)
+//
+// Response uses "tarih"/"fiyat" field names.
 package tefas
 
 import (
@@ -13,6 +16,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/cookiejar"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -21,19 +25,17 @@ import (
 )
 
 const (
-	defaultBaseURL      = "https://www.tefas.gov.tr"
-	priceEndpointPath   = "/api/funds/fonFiyatBilgiGetir"
-	defaultUserAgent    = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+	defaultBaseURL    = "https://www.tefas.gov.tr"
+	priceEndpointPath = "/api/funds/fonFiyatBilgiGetir"
+	defaultUserAgent  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-// validPeriods are the only periyod values accepted by the new TEFAS API.
+// validPeriods are the only periyod values accepted by the TEFAS API.
 var validPeriods = []int{1, 3, 6, 12, 36, 60}
 
-// monthsBack snaps the requested lookback (from → today) to the smallest
-// valid period that covers the range. Returns 60 for anything older.
 func monthsBack(from time.Time) int {
 	days := int(time.Since(from).Hours() / 24)
-	needed := days/30 + 2 // +2 for safety margin
+	needed := days/30 + 2
 	for _, p := range validPeriods {
 		if p >= needed {
 			return p
@@ -42,12 +44,11 @@ func monthsBack(from time.Time) int {
 	return 60
 }
 
-// New TEFAS API response structures
-
+// priceItem matches the new TEFAS API response fields.
 type priceItem struct {
-	FonKodu   string  `json:"fonKodu"`
-	Tarih     string  `json:"tarih"`   // "2026-05-01T00:00:00"
-	BirimPay  float64 `json:"birimPay"`
+	FonKodu  string  `json:"fonKodu"`
+	Tarih    string  `json:"tarih"`  // "2026-05-01"
+	Fiyat    float64 `json:"fiyat"`
 }
 
 type priceResponse struct {
@@ -58,12 +59,17 @@ type Scraper struct {
 	workers int
 	client  *http.Client
 	baseURL string
+	seeded  bool // true once session cookie has been obtained
 }
 
 func New(opts ...Option) *Scraper {
+	jar, _ := cookiejar.New(nil)
 	s := &Scraper{
 		workers: 5,
-		client:  http.DefaultClient,
+		client: &http.Client{
+			Jar:     jar,
+			Timeout: 30 * time.Second,
+		},
 		baseURL: defaultBaseURL,
 	}
 	for _, o := range opts {
@@ -74,16 +80,36 @@ func New(opts ...Option) *Scraper {
 
 type Option func(*Scraper)
 
-func WithWorkers(n int) Option   { return func(s *Scraper) { s.workers = n } }
+func WithWorkers(n int) Option        { return func(s *Scraper) { s.workers = n } }
 func WithClient(c *http.Client) Option { return func(s *Scraper) { s.client = c } }
-func WithBaseURL(u string) Option { return func(s *Scraper) { s.baseURL = u } }
+func WithBaseURL(u string) Option      { return func(s *Scraper) { s.baseURL = u } }
 
-// Legacy options — kept for backwards compatibility but no-ops with new API.
+// Legacy options — no-ops, kept for backwards compatibility.
 func WithHistoryEndpoint(_ string) Option { return func(_ *Scraper) {} }
 func WithReferer(_ string) Option         { return func(_ *Scraper) {} }
 
-func (s *Scraper) Source() string              { return "tefas" }
-func (s *Scraper) NativeCurrency(_ string) string { return "TRY" }
+func (s *Scraper) Source() string                    { return "tefas" }
+func (s *Scraper) NativeCurrency(_ string) string    { return "TRY" }
+
+// seedSession visits the TEFAS homepage once to obtain the required session cookies.
+func (s *Scraper) seedSession(ctx context.Context) error {
+	if s.seeded {
+		return nil
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", s.baseURL+"/", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", defaultUserAgent)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return err
+	}
+	_ = resp.Body.Close()
+	s.seeded = true
+	slog.Debug("tefas session seeded")
+	return nil
+}
 
 func (s *Scraper) Scrape(ctx context.Context, symbol string, from, to time.Time) ([]scraper.ScrapedPrice, error) {
 	if symbol == "" {
@@ -96,8 +122,11 @@ func (s *Scraper) Scrape(ctx context.Context, symbol string, from, to time.Time)
 		to = time.Now()
 	}
 
-	period := monthsBack(from)
+	if err := s.seedSession(ctx); err != nil {
+		slog.Warn("tefas: session seed failed, continuing anyway", "error", err)
+	}
 
+	period := monthsBack(from)
 	items, err := s.fetchPrices(ctx, symbol, period)
 	if err != nil {
 		return nil, err
@@ -106,16 +135,15 @@ func (s *Scraper) Scrape(ctx context.Context, symbol string, from, to time.Time)
 	var prices []scraper.ScrapedPrice
 	for _, item := range items {
 		t := parseDate(item.Tarih)
-		if t.IsZero() || item.BirimPay <= 0 {
+		if t.IsZero() || item.Fiyat <= 0 {
 			continue
 		}
-		// Filter to requested [from, to] range (API returns full period).
 		if t.Before(from.Truncate(24*time.Hour)) || t.After(to.Add(24*time.Hour)) {
 			continue
 		}
 		prices = append(prices, scraper.ScrapedPrice{
 			Date:       t,
-			ClosePrice: item.BirimPay,
+			ClosePrice: item.Fiyat,
 		})
 	}
 
@@ -133,14 +161,15 @@ func (s *Scraper) fetchPrices(ctx context.Context, fundCode string, periodMonths
 		return nil, err
 	}
 
-	url := s.baseURL + priceEndpointPath
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, "POST", s.baseURL+priceEndpointPath, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("User-Agent", defaultUserAgent)
+	req.Header.Set("Origin", s.baseURL)
+	req.Header.Set("Referer", s.baseURL+"/TarihselVeriler.aspx")
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -164,10 +193,9 @@ func (s *Scraper) fetchPrices(ctx context.Context, fundCode string, periodMonths
 	return pr.ResultList, nil
 }
 
-// Worker pool helper used by Scrape for future parallelism (single chunk now).
-var _ = errgroup.Group{} // keep import
+// keep errgroup import used in other scraper packages
+var _ = errgroup.Group{}
 
-// parseDate handles TEFAS ISO-like date strings: "2026-05-01T00:00:00".
 func parseDate(s string) time.Time {
 	if len(s) >= 10 {
 		t, err := time.Parse("2006-01-02", s[:10])

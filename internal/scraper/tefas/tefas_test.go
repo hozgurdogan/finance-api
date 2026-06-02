@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -11,26 +12,31 @@ import (
 
 func TestScrape(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Session seed GET
+		if r.Method == "GET" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		if r.Method != "POST" {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
 		if r.Header.Get("Content-Type") != "application/json" {
 			t.Errorf("unexpected content type: %s", r.Header.Get("Content-Type"))
 		}
-
 		resp := priceResponse{
 			ResultList: []priceItem{
-				{FonKodu: "YAC", Tarih: "2024-01-01T00:00:00", BirimPay: 1.23},
-				{FonKodu: "YAC", Tarih: "2024-01-02T00:00:00", BirimPay: 1.24},
+				{FonKodu: "YAC", Tarih: "2024-01-01", Fiyat: 1.23},
+				{FonKodu: "YAC", Tarih: "2024-01-02", Fiyat: 1.24},
 			},
 		}
 		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer ts.Close()
 
+	jar, _ := cookiejar.New(nil)
 	s := New(
 		WithWorkers(1),
-		WithClient(ts.Client()),
+		WithClient(&http.Client{Jar: jar}),
 		WithBaseURL(ts.URL),
 	)
 
