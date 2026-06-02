@@ -21,7 +21,7 @@ const (
 	defaultBaseURL         = "https://www.tefas.gov.tr"
 	defaultHistoryEndpoint = "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"
 	defaultReferer         = "http://www.tefas.gov.tr/TarihselVeriler.aspx"
-	dateFormat             = "2006-01-02"
+	dateFormat             = "02.01.2006" // TEFAS expects DD.MM.YYYY format
 	chunkDays              = 60
 )
 
